@@ -402,14 +402,15 @@ module axis_stream_to_pkt_backpressured
    enum                      {
                               S_OUTPUT_HEADER,
                               S_OUTPUT_TIME,
-                              S_OUTPUT_SAMPLES
+                              S_OUTPUT_SAMPLES,
+                              S_FIFO_DRAIN
                               }  output_state;
 
    axis_t axis_pfifo(.clk(clk));
 
    always_ff @(posedge clk) begin
       if (rst) begin
-         output_state <= S_OUTPUT_HEADER;
+         output_state <= S_FIFO_DRAIN;
       end else begin
          case (output_state)
            //
@@ -420,6 +421,10 @@ module axis_stream_to_pkt_backpressured
            S_OUTPUT_HEADER: begin
               if (tfifo_tvalid && axis_pfifo.tready)
                 output_state <= S_OUTPUT_TIME;
+              else if (!tfifo_tvalid && !enable)
+                // There is not enough data to begin producing a new packet and
+                // enable is low, so purge the FIFOs.
+                output_state <= S_FIFO_DRAIN;
               else
                 output_state <= S_OUTPUT_HEADER;
            end
@@ -439,9 +444,12 @@ module axis_stream_to_pkt_backpressured
            //
            S_OUTPUT_SAMPLES: begin
               if (sfifo_tvalid && sfifo_tlast && axis_pfifo.tready)
-                output_state <= S_OUTPUT_HEADER;
+                output_state <= enable ? S_OUTPUT_HEADER : S_FIFO_DRAIN;
               else
                 output_state <= S_OUTPUT_SAMPLES;
+           end
+           S_FIFO_DRAIN: begin
+              if (enable) output_state <= S_OUTPUT_HEADER;
            end
            //
            // Default same as S_OUTPUT_HEADER
@@ -537,6 +545,13 @@ module axis_stream_to_pkt_backpressured
           axis_pfifo.tlast = sfifo_tlast;
           tfifo_tready = 1'b0;
           sfifo_tready = axis_pfifo.tready;
+       end
+       S_FIFO_DRAIN: begin
+          axis_pfifo.tdata = '0;
+          axis_pfifo.tvalid = 1'b0;
+          axis_pfifo.tlast = 1'b0;
+          tfifo_tready = 1'b1;
+          sfifo_tready = 1'b1;
        end
 
        default: begin
