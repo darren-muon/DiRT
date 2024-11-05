@@ -122,54 +122,25 @@ module axis_stream_to_pkt_backpressured
          } burst_state;
 
    always_ff @(posedge clk)
-     if (rst) begin
+     if (rst || !enable) begin
         burst_state <= S_NEW_BURST;
         burst_count <= burst_size;
-     end else begin
-        case(burst_state)
-          //
-          S_NEW_BURST: begin
-             if (!enable) begin
-                burst_state <= S_NEW_BURST;
-                burst_count <= burst_size;
-             end else  if (ingress_beat) begin
-                // First beat of first packet of new burst
-                if (burst_size != 0) begin
-                   // Allow for infinite burst.
-                   burst_count <= burst_count - 1;
-                end
-                if (burst_count == 1) begin
-                   // EOB - Corner case 1 beat burst
-                   burst_state <= S_NEW_BURST;
-                   burst_count <= burst_size;
-                   // TODO: GO IDLE HERE IF NOT CHAINED.
-                end else begin
-                   // Move to active Burst state
-                   burst_state <= S_IN_BURST;
-                end
-             end // if (ingress_beat)
-          end // case: S_NEW_BURST
-          //
-          S_IN_BURST: begin
-             if (ingress_beat) begin
-                if (burst_size != 0) begin
-                   // Allow for infinite burst.
-                   burst_count <= burst_count - 1;
-                end
-                if (burst_count == 1) begin
-                   // EOB
-                   burst_state <= S_NEW_BURST;
-                   burst_count <= burst_size;
-                   // TODO: GO IDLE HERE IF NOT CHAINED.
-                end else begin
-                   // Stay in active Burst state
-                   burst_state <= S_IN_BURST;
-                end
-             end
-          end // case: S_IN_BURST
-        endcase // case (burst_state)
-     end // else: !if(rst)
-
+     end else if (ingress_beat) begin
+        // First beat of first packet of new burst
+        if (burst_size != 0) begin
+           // Allow for infinite burst.
+           burst_count <= burst_count - 1;
+        end
+        if (burst_count == 1) begin
+           // EOB - Corner case 1 beat burst
+           burst_state <= S_NEW_BURST;
+           burst_count <= burst_size;
+           // TODO: GO IDLE HERE IF NOT CHAINED.
+        end else begin
+           // Move to active Burst state
+           burst_state <= S_IN_BURST;
+        end
+     end // if (ingress_beat)
 
    enum {
          S_INPUT_IDLE,
@@ -178,7 +149,7 @@ module axis_stream_to_pkt_backpressured
          } input_state;
 
    always_ff @(posedge clk)
-     if (rst) begin
+     if (rst || !enable) begin
         input_state <= S_INPUT_IDLE;
         input_count <= 1;
      end else begin
@@ -186,9 +157,7 @@ module axis_stream_to_pkt_backpressured
           //
           S_INPUT_IDLE: begin
              input_count <= 1; // Samples are 32bits. Preload with 1 to account for 1 sample in flight.
-             if (!enable) begin
-                input_state <= S_INPUT_IDLE;
-             end else if (ingress_beat) begin
+             if (ingress_beat) begin
                 input_count <= input_count + 1'b1;
                 if (input_count >= packet_size) begin
                    // Corner case - 1 sample packet config
@@ -236,8 +205,7 @@ module axis_stream_to_pkt_backpressured
              end
           end // case: S_INPUT_PHASE2
         endcase // case (input_state)
-     end // else: !if(rst)
-
+     end // else: !if(rst || !enable)
 
    //-----------------------------------------------------------------------------
    //
