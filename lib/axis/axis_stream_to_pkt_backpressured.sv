@@ -246,6 +246,11 @@ module axis_stream_to_pkt_backpressured
    wire                   tfifo_tvalid;
    logic                  tfifo_tready;
 
+   // Used to hold the FIFOs in reset when output_state == S_FIFO_RESET. A
+   // register is used instead of a combinational output_state == S_FIFO_RESET
+   // comparison to improve timing closure.
+   logic                  fifos_reset;
+
    axis_fifo
      #(
        .WIDTH(64+14+1),
@@ -254,7 +259,7 @@ module axis_stream_to_pkt_backpressured
    time_fifo
      (
       .clk(clk),
-      .rst(rst),
+      .rst(rst || fifos_reset),
       // Input AXIS bus
       // (Control plane needs to constrain valid range of input count so it
       // can't overflow here, though in practice real systems will uses packet sizes
@@ -316,7 +321,7 @@ module axis_stream_to_pkt_backpressured
    sample_fifo
      (
       .clk(clk),
-      .rst(rst),
+      .rst(rst || fifos_reset),
       // Input AXIS bus
       // Mux sample data depending on if we are finishing an odd length packet
       // or a regular beat with 2 paired samples.
@@ -371,14 +376,14 @@ module axis_stream_to_pkt_backpressured
                               S_OUTPUT_HEADER,
                               S_OUTPUT_TIME,
                               S_OUTPUT_SAMPLES,
-                              S_FIFO_DRAIN
+                              S_FIFO_RESET
                               }  output_state;
 
    axis_t axis_pfifo(.clk(clk));
 
    always_ff @(posedge clk) begin
       if (rst) begin
-         output_state <= S_FIFO_DRAIN;
+         output_state <= S_FIFO_RESET;
       end else begin
          case (output_state)
            //
@@ -391,8 +396,8 @@ module axis_stream_to_pkt_backpressured
                 output_state <= S_OUTPUT_TIME;
               else if (!tfifo_tvalid && !enable)
                 // There is not enough data to begin producing a new packet and
-                // enable is low, so purge the FIFOs.
-                output_state <= S_FIFO_DRAIN;
+                // enable is low, so reset the FIFOs.
+                output_state <= S_FIFO_RESET;
               else
                 output_state <= S_OUTPUT_HEADER;
            end
@@ -412,11 +417,11 @@ module axis_stream_to_pkt_backpressured
            //
            S_OUTPUT_SAMPLES: begin
               if (sfifo_tvalid && sfifo_tlast && axis_pfifo.tready)
-                output_state <= enable ? S_OUTPUT_HEADER : S_FIFO_DRAIN;
+                output_state <= enable ? S_OUTPUT_HEADER : S_FIFO_RESET;
               else
                 output_state <= S_OUTPUT_SAMPLES;
            end
-           S_FIFO_DRAIN: begin
+           S_FIFO_RESET: begin
               if (enable) output_state <= S_OUTPUT_HEADER;
            end
            //
@@ -432,6 +437,11 @@ module axis_stream_to_pkt_backpressured
          endcase // case (output_state)
       end // else: !if(rst)
    end // always_ff @ (posedge clk)
+
+   always_ff @(posedge clk) begin
+      // this register does not need a reset
+      fifos_reset <= output_state == S_FIFO_RESET;      
+   end
 
    //
    // Sequence ID is reset every time that we dissable this module
@@ -514,12 +524,12 @@ module axis_stream_to_pkt_backpressured
           tfifo_tready = 1'b0;
           sfifo_tready = axis_pfifo.tready;
        end
-       S_FIFO_DRAIN: begin
+       S_FIFO_RESET: begin
           axis_pfifo.tdata = '0;
           axis_pfifo.tvalid = 1'b0;
           axis_pfifo.tlast = 1'b0;
-          tfifo_tready = 1'b1;
-          sfifo_tready = 1'b1;
+          tfifo_tready = 1'b0;
+          sfifo_tready = 1'b0;
        end
 
        default: begin
