@@ -122,54 +122,25 @@ module axis_stream_to_pkt_backpressured
          } burst_state;
 
    always_ff @(posedge clk)
-     if (rst) begin
+     if (rst || !enable) begin
         burst_state <= S_NEW_BURST;
         burst_count <= burst_size;
-     end else begin
-        case(burst_state)
-          //
-          S_NEW_BURST: begin
-             if (!enable) begin
-                burst_state <= S_NEW_BURST;
-                burst_count <= burst_size;
-             end else  if (ingress_beat) begin
-                // First beat of first packet of new burst
-                if (burst_size != 0) begin
-                   // Allow for infinite burst.
-                   burst_count <= burst_count - 1;
-                end
-                if (burst_count == 1) begin
-                   // EOB - Corner case 1 beat burst
-                   burst_state <= S_NEW_BURST;
-                   burst_count <= burst_size;
-                   // TODO: GO IDLE HERE IF NOT CHAINED.
-                end else begin
-                   // Move to active Burst state
-                   burst_state <= S_IN_BURST;
-                end
-             end // if (ingress_beat)
-          end // case: S_NEW_BURST
-          //
-          S_IN_BURST: begin
-             if (ingress_beat) begin
-                if (burst_size != 0) begin
-                   // Allow for infinite burst.
-                   burst_count <= burst_count - 1;
-                end
-                if (burst_count == 1) begin
-                   // EOB
-                   burst_state <= S_NEW_BURST;
-                   burst_count <= burst_size;
-                   // TODO: GO IDLE HERE IF NOT CHAINED.
-                end else begin
-                   // Stay in active Burst state
-                   burst_state <= S_IN_BURST;
-                end
-             end
-          end // case: S_IN_BURST
-        endcase // case (burst_state)
-     end // else: !if(rst)
-
+     end else if (ingress_beat) begin
+        // First beat of first packet of new burst
+        if (burst_size != 0) begin
+           // Allow for infinite burst.
+           burst_count <= burst_count - 1;
+        end
+        if (burst_count == 1) begin
+           // EOB - Corner case 1 beat burst
+           burst_state <= S_NEW_BURST;
+           burst_count <= burst_size;
+           // TODO: GO IDLE HERE IF NOT CHAINED.
+        end else begin
+           // Move to active Burst state
+           burst_state <= S_IN_BURST;
+        end
+     end // if (ingress_beat)
 
    enum {
          S_INPUT_IDLE,
@@ -178,7 +149,7 @@ module axis_stream_to_pkt_backpressured
          } input_state;
 
    always_ff @(posedge clk)
-     if (rst) begin
+     if (rst || !enable) begin
         input_state <= S_INPUT_IDLE;
         input_count <= 1;
      end else begin
@@ -186,9 +157,7 @@ module axis_stream_to_pkt_backpressured
           //
           S_INPUT_IDLE: begin
              input_count <= 1; // Samples are 32bits. Preload with 1 to account for 1 sample in flight.
-             if (!enable) begin
-                input_state <= S_INPUT_IDLE;
-             end else if (ingress_beat) begin
+             if (ingress_beat) begin
                 input_count <= input_count + 1'b1;
                 if (input_count >= packet_size) begin
                    // Corner case - 1 sample packet config
@@ -236,8 +205,7 @@ module axis_stream_to_pkt_backpressured
              end
           end // case: S_INPUT_PHASE2
         endcase // case (input_state)
-     end // else: !if(rst)
-
+     end // else: !if(rst || !enable)
 
    //-----------------------------------------------------------------------------
    //
@@ -278,6 +246,11 @@ module axis_stream_to_pkt_backpressured
    wire                   tfifo_tvalid;
    logic                  tfifo_tready;
 
+   // Used to hold the FIFOs in reset when output_state == S_FIFO_RESET. A
+   // register is used instead of a combinational output_state == S_FIFO_RESET
+   // comparison to improve timing closure.
+   logic                  fifos_reset;
+
    axis_fifo
      #(
        .WIDTH(64+14+1),
@@ -286,7 +259,7 @@ module axis_stream_to_pkt_backpressured
    time_fifo
      (
       .clk(clk),
-      .rst(rst),
+      .rst(rst || fifos_reset),
       // Input AXIS bus
       // (Control plane needs to constrain valid range of input count so it
       // can't overflow here, though in practice real systems will uses packet sizes
@@ -348,7 +321,7 @@ module axis_stream_to_pkt_backpressured
    sample_fifo
      (
       .clk(clk),
-      .rst(rst),
+      .rst(rst || fifos_reset),
       // Input AXIS bus
       // Mux sample data depending on if we are finishing an odd length packet
       // or a regular beat with 2 paired samples.
@@ -402,14 +375,15 @@ module axis_stream_to_pkt_backpressured
    enum                      {
                               S_OUTPUT_HEADER,
                               S_OUTPUT_TIME,
-                              S_OUTPUT_SAMPLES
+                              S_OUTPUT_SAMPLES,
+                              S_FIFO_RESET
                               }  output_state;
 
    axis_t axis_pfifo(.clk(clk));
 
    always_ff @(posedge clk) begin
       if (rst) begin
-         output_state <= S_OUTPUT_HEADER;
+         output_state <= S_FIFO_RESET;
       end else begin
          case (output_state)
            //
@@ -420,6 +394,10 @@ module axis_stream_to_pkt_backpressured
            S_OUTPUT_HEADER: begin
               if (tfifo_tvalid && axis_pfifo.tready)
                 output_state <= S_OUTPUT_TIME;
+              else if (!tfifo_tvalid && !enable)
+                // There is not enough data to begin producing a new packet and
+                // enable is low, so reset the FIFOs.
+                output_state <= S_FIFO_RESET;
               else
                 output_state <= S_OUTPUT_HEADER;
            end
@@ -439,9 +417,12 @@ module axis_stream_to_pkt_backpressured
            //
            S_OUTPUT_SAMPLES: begin
               if (sfifo_tvalid && sfifo_tlast && axis_pfifo.tready)
-                output_state <= S_OUTPUT_HEADER;
+                output_state <= enable ? S_OUTPUT_HEADER : S_FIFO_RESET;
               else
                 output_state <= S_OUTPUT_SAMPLES;
+           end
+           S_FIFO_RESET: begin
+              if (enable) output_state <= S_OUTPUT_HEADER;
            end
            //
            // Default same as S_OUTPUT_HEADER
@@ -456,6 +437,11 @@ module axis_stream_to_pkt_backpressured
          endcase // case (output_state)
       end // else: !if(rst)
    end // always_ff @ (posedge clk)
+
+   always_ff @(posedge clk) begin
+      // this register does not need a reset
+      fifos_reset <= output_state == S_FIFO_RESET;      
+   end
 
    //
    // Sequence ID is reset every time that we dissable this module
@@ -537,6 +523,13 @@ module axis_stream_to_pkt_backpressured
           axis_pfifo.tlast = sfifo_tlast;
           tfifo_tready = 1'b0;
           sfifo_tready = axis_pfifo.tready;
+       end
+       S_FIFO_RESET: begin
+          axis_pfifo.tdata = '0;
+          axis_pfifo.tvalid = 1'b0;
+          axis_pfifo.tlast = 1'b0;
+          tfifo_tready = 1'b0;
+          sfifo_tready = 1'b0;
        end
 
        default: begin
