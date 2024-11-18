@@ -349,7 +349,7 @@ module axis_stream_to_pkt_backpressured
    sample_fifo_minimal
      (
       .clk(clk),
-      .rst(rst),
+      .rst(rst || fifos_reset),
       // Input AXIS bus
       .in_tdata({sfifo_minimal_tlast,sfifo_minimal_tdata}),
       .in_tvalid(sfifo_minimal_tvalid),
